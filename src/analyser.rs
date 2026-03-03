@@ -137,6 +137,63 @@ impl HighlightAnalyser {
             }
         }
     }
+
+    fn push_non_lethal_airshot(&mut self, tick: u32, attacker: u16, user_id: u16, damage: u16) {
+        let victim_uid = UserId::from(user_id);
+        let victim_entity = self.user_to_entity.get(&victim_uid).copied();
+
+        let is_airborne = victim_entity
+            .and_then(|eid| self.entity_flags.get(&eid))
+            .map(|flags| flags & FL_ONGROUND == 0)
+            .unwrap_or(false);
+
+        if !is_airborne {
+            return;
+        }
+
+        let height = victim_entity.and_then(|eid| self.compute_height(eid));
+        let killer = self.resolve_name(attacker);
+        let victim = self.resolve_name(user_id);
+
+        self.highlights.push(Highlight {
+            tick,
+            kind: HighlightKind::Airshot,
+            killer,
+            victim,
+            weapon: String::new(),
+            lethal: false,
+            height,
+            damage: Some(damage),
+        });
+    }
+
+    fn deduplicated_highlights(self) -> Vec<Highlight> {
+        use std::collections::HashSet;
+
+        // Collect (tick, victim) pairs for lethal airshots
+        let lethal_keys: HashSet<(u32, String)> = self
+            .highlights
+            .iter()
+            .filter(|h| h.lethal && matches!(h.kind, HighlightKind::Airshot))
+            .map(|h| (h.tick, h.victim.clone()))
+            .collect();
+
+        let mut result: Vec<Highlight> = self
+            .highlights
+            .into_iter()
+            .filter(|h| {
+                // Remove non-lethal airshots that have a lethal counterpart at same tick+victim
+                if !h.lethal && matches!(h.kind, HighlightKind::Airshot) {
+                    !lethal_keys.contains(&(h.tick, h.victim.clone()))
+                } else {
+                    true
+                }
+            })
+            .collect();
+
+        result.sort_by_key(|h| h.tick);
+        result
+    }
 }
 
 impl MessageHandler for HighlightAnalyser {
@@ -180,27 +237,38 @@ impl MessageHandler for HighlightAnalyser {
                 }
             }
             Message::GameEvent(event_msg) => {
-                if let GameEvent::PlayerDeath(event) = &event_msg.event {
-                    let victim_uid = UserId::from(event.user_id);
-                    let victim_entity = self.user_to_entity.get(&victim_uid).copied();
+                match &event_msg.event {
+                    GameEvent::PlayerDeath(event) => {
+                        let victim_uid = UserId::from(event.user_id);
+                        let victim_entity = self.user_to_entity.get(&victim_uid).copied();
 
-                    let is_airborne = victim_entity
-                        .and_then(|eid| self.entity_flags.get(&eid))
-                        .map(|flags| flags & FL_ONGROUND == 0)
-                        .unwrap_or(false);
+                        let is_airborne = victim_entity
+                            .and_then(|eid| self.entity_flags.get(&eid))
+                            .map(|flags| flags & FL_ONGROUND == 0)
+                            .unwrap_or(false);
 
-                    let height = victim_entity.and_then(|eid| self.compute_height(eid));
+                        let height = victim_entity.and_then(|eid| self.compute_height(eid));
 
-                    self.detect(
-                        u32::from(tick),
-                        event.attacker,
-                        event.user_id,
-                        event.weapon.as_ref(),
-                        event.custom_kill,
-                        is_airborne,
-                        true,
-                        height,
-                    );
+                        self.detect(
+                            u32::from(tick),
+                            event.attacker,
+                            event.user_id,
+                            event.weapon.as_ref(),
+                            event.custom_kill,
+                            is_airborne,
+                            true,
+                            height,
+                        );
+                    }
+                    GameEvent::PlayerHurt(event) => {
+                        self.push_non_lethal_airshot(
+                            u32::from(tick),
+                            event.attacker,
+                            event.user_id,
+                            event.damage_amount,
+                        );
+                    }
+                    _ => {}
                 }
             }
             _ => {}
@@ -228,7 +296,7 @@ impl MessageHandler for HighlightAnalyser {
     }
 
     fn into_output(self, _state: &ParserState) -> Self::Output {
-        self.highlights
+        self.deduplicated_highlights()
     }
 }
 
@@ -332,5 +400,67 @@ mod tests {
         analyser.entity_ground_z.insert(eid, 100.0);
         // entity_origin_z not populated
         assert_eq!(analyser.compute_height(eid), None);
+    }
+
+    // --- Task 3 tests ---
+
+    #[test]
+    fn test_non_lethal_airshot_added_when_airborne() {
+        let mut analyser = HighlightAnalyser::new();
+        let eid = EntityId::from(4u32);
+        // Mark victim as airborne (FL_ONGROUND not set)
+        analyser.entity_flags.insert(eid, 0);
+        analyser.user_to_entity.insert(UserId::from(2u16), eid);
+        analyser.players.insert(UserId::from(1u16), "A".to_string());
+        analyser.players.insert(UserId::from(2u16), "B".to_string());
+
+        analyser.push_non_lethal_airshot(100, 1, 2, 75);
+        assert_eq!(analyser.highlights.len(), 1);
+        assert!(!analyser.highlights[0].lethal);
+        assert_eq!(analyser.highlights[0].damage, Some(75));
+    }
+
+    #[test]
+    fn test_non_lethal_airshot_not_added_when_grounded() {
+        let mut analyser = HighlightAnalyser::new();
+        let eid = EntityId::from(5u32);
+        // Mark victim as on ground (FL_ONGROUND set)
+        analyser.entity_flags.insert(eid, FL_ONGROUND);
+        analyser.user_to_entity.insert(UserId::from(2u16), eid);
+        analyser.players.insert(UserId::from(1u16), "A".to_string());
+        analyser.players.insert(UserId::from(2u16), "B".to_string());
+
+        analyser.push_non_lethal_airshot(100, 1, 2, 75);
+        assert!(analyser.highlights.is_empty());
+    }
+
+    #[test]
+    fn test_deduplication_removes_non_lethal_when_lethal_exists() {
+        let mut analyser = HighlightAnalyser::new();
+        // One lethal and one non-lethal at same tick for same victim
+        analyser.highlights.push(Highlight {
+            tick: 100,
+            kind: HighlightKind::Airshot,
+            killer: "A".to_string(),
+            victim: "B".to_string(),
+            weapon: "tf_projectile_rocket".to_string(),
+            lethal: true,
+            height: None,
+            damage: None,
+        });
+        analyser.highlights.push(Highlight {
+            tick: 100,
+            kind: HighlightKind::Airshot,
+            killer: "A".to_string(),
+            victim: "B".to_string(),
+            weapon: String::new(),
+            lethal: false,
+            height: None,
+            damage: Some(75),
+        });
+
+        let output = analyser.deduplicated_highlights();
+        assert_eq!(output.len(), 1);
+        assert!(output[0].lethal);
     }
 }
