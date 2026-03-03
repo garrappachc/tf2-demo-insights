@@ -61,8 +61,10 @@ pub struct HighlightAnalyser {
     /// Maps UserId to entity index, populated from the userinfo string table.
     user_to_entity: HashMap<UserId, EntityId>,
     /// Current Z coordinate per entity, from DT_BaseEntity::m_vecOrigin.
+    /// `pub` so tests can pre-populate Z state without going through PacketEntities.
     pub entity_origin_z: HashMap<EntityId, f32>,
     /// Last Z coordinate where FL_ONGROUND was set, per entity.
+    /// `pub` so tests can pre-populate Z state without going through PacketEntities.
     pub entity_ground_z: HashMap<EntityId, f32>,
 }
 
@@ -82,6 +84,7 @@ impl HighlightAnalyser {
     fn compute_height(&self, entity_id: EntityId) -> Option<f32> {
         let current_z = self.entity_origin_z.get(&entity_id)?;
         let ground_z = self.entity_ground_z.get(&entity_id)?;
+        // Clamp to 0: origin can briefly dip below ground_z on slopes.
         Some((current_z - ground_z).max(0.0))
     }
 
@@ -159,7 +162,10 @@ impl MessageHandler for HighlightAnalyser {
                             self.entity_origin_z.insert(entity.entity_index, v.z);
                         }
 
-                        // 2. Update flags, and when on ground capture Z as ground reference
+                        // 2. Update flags, and when on ground capture Z as ground reference.
+                        // If m_vecOrigin was absent from this delta update, entity_origin_z
+                        // still holds the last-known position — the correct ground reference
+                        // for a landing event where only m_fFlags changed.
                         if let Some(prop) = entity.get_prop_by_name("DT_BasePlayer", "m_fFlags", parser_state)
                             && let SendPropValue::Integer(flags) = prop.value
                         {
@@ -229,6 +235,7 @@ impl MessageHandler for HighlightAnalyser {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tf_demo_parser::demo::message::packetentities::EntityId;
 
     #[test]
     fn test_headshot_detected() {
@@ -296,7 +303,6 @@ mod tests {
     #[test]
     fn test_compute_height_above_ground() {
         let mut analyser = HighlightAnalyser::new();
-        use tf_demo_parser::demo::message::packetentities::EntityId;
         let eid = EntityId::from(5u32);
         analyser.entity_ground_z.insert(eid, 100.0);
         analyser.entity_origin_z.insert(eid, 184.5);
@@ -306,7 +312,6 @@ mod tests {
     #[test]
     fn test_compute_height_below_ground_clamps_to_zero() {
         let mut analyser = HighlightAnalyser::new();
-        use tf_demo_parser::demo::message::packetentities::EntityId;
         let eid = EntityId::from(6u32);
         analyser.entity_ground_z.insert(eid, 200.0);
         analyser.entity_origin_z.insert(eid, 190.0);
@@ -316,8 +321,16 @@ mod tests {
     #[test]
     fn test_compute_height_unknown_returns_none() {
         let analyser = HighlightAnalyser::new();
-        use tf_demo_parser::demo::message::packetentities::EntityId;
         let eid = EntityId::from(7u32);
+        assert_eq!(analyser.compute_height(eid), None);
+    }
+
+    #[test]
+    fn test_compute_height_missing_origin_returns_none() {
+        let mut analyser = HighlightAnalyser::new();
+        let eid = EntityId::from(8u32);
+        analyser.entity_ground_z.insert(eid, 100.0);
+        // entity_origin_z not populated
         assert_eq!(analyser.compute_height(eid), None);
     }
 }
