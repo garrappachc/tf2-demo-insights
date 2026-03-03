@@ -45,50 +45,52 @@ fn main() {
         .iter()
         .map(|h| h.killer.len().max(h.victim.len()))
         .max()
-        .unwrap_or(0);
+        .unwrap_or(10);
 
     for h in &highlights {
-        let kind_str = match h.kind {
-            HighlightKind::Headshot => "HEADSHOT",
-            HighlightKind::Airshot => "AIRSHOT ",
+        let kind_str = match (&h.kind, h.lethal) {
+            (HighlightKind::Airshot, true)  => "AIRSHOT*",
+            (HighlightKind::Airshot, false) => "AIRSHOT ",
+            _                               => "HEADSHOT",
         };
+
+        // Height column: "+NNN.Nu" (7 chars + unit) or 8 spaces to match
+        let height_str = match h.height {
+            Some(ht) => format!("{:+7.1}u", ht),
+            None      => "        ".to_string(), // 8 spaces
+        };
+
+        let trailing = match (&h.kind, h.lethal) {
+            (HighlightKind::Airshot, false) => {
+                format!("({} dmg)", h.damage.unwrap_or(0))
+            }
+            _ => {
+                format!("(weapon: {})", h.weapon)
+            }
+        };
+
         println!(
-            "[tick {:>6}] {}  {:width$}  \u{2192}  {:width$}  (weapon: {})",
+            "[tick {:>6}] {}  {:width$}  \u{2192}  {:width$}  {}  {}",
             h.tick,
             kind_str,
             h.killer,
             h.victim,
-            h.weapon,
+            height_str,
+            trailing,
             width = name_width,
         );
     }
 
-    let headshots = highlights
-        .iter()
-        .filter(|h| h.kind == HighlightKind::Headshot)
-        .count();
-    let airshots = highlights
-        .iter()
-        .filter(|h| h.kind == HighlightKind::Airshot)
-        .count();
-    let total = highlights.len();
-
-    let headshot_str = if headshots == 1 {
-        "1 headshot".to_string()
-    } else {
-        format!("{} headshots", headshots)
-    };
-    let airshot_str = if airshots == 1 {
-        "1 airshot".to_string()
-    } else {
-        format!("{} airshots", airshots)
-    };
+    let headshots = highlights.iter().filter(|h| matches!(h.kind, HighlightKind::Headshot)).count();
+    let total_airshots = highlights.iter().filter(|h| matches!(h.kind, HighlightKind::Airshot)).count();
+    let lethal_airshots = highlights.iter().filter(|h| matches!(h.kind, HighlightKind::Airshot) && h.lethal).count();
 
     println!(
-        "\n--- Summary: {} highlight{} ({}, {}) ---",
-        total,
-        if total == 1 { "" } else { "s" },
-        headshot_str,
-        airshot_str,
+        "\n--- Summary: {} headshot{} | {} airshot{} ({} lethal) ---",
+        headshots,
+        if headshots == 1 { "" } else { "s" },
+        total_airshots,
+        if total_airshots == 1 { "" } else { "s" },
+        lethal_airshots,
     );
 }
