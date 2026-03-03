@@ -86,8 +86,8 @@ impl MessageHandler for HighlightAnalyser {
     }
 
     fn handle_message(&mut self, message: &Message, tick: DemoTick, _parser_state: &ParserState) {
-        if let Message::GameEvent(event_msg) = message {
-            if let GameEvent::PlayerDeath(event) = &event_msg.event {
+        if let Message::GameEvent(event_msg) = message
+            && let GameEvent::PlayerDeath(event) = &event_msg.event {
                 self.detect(
                     u32::from(tick),
                     event.attacker,
@@ -97,7 +97,6 @@ impl MessageHandler for HighlightAnalyser {
                     event.rocket_jump,
                 );
             }
-        }
     }
 
     fn handle_string_entry(
