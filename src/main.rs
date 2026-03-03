@@ -21,7 +21,7 @@ fn main() {
     let file = match std::fs::read(&args.demo) {
         Ok(bytes) => bytes,
         Err(e) => {
-            eprintln!("Error reading {:?}: {}", args.demo, e);
+            eprintln!("Error reading {}: {}", args.demo.display(), e);
             process::exit(1);
         }
     };

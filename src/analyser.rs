@@ -92,7 +92,7 @@ impl MessageHandler for HighlightAnalyser {
                     u32::from(tick),
                     event.attacker,
                     event.user_id,
-                    &event.weapon.to_string(),
+                    event.weapon.as_ref(),
                     event.custom_kill,
                     event.rocket_jump,
                 );
