@@ -20,6 +20,7 @@ pub enum HighlightKind {
 
 #[derive(Debug, Clone)]
 pub struct Highlight {
+    #[allow(dead_code)]
     pub tick: u32,
     pub kind: HighlightKind,
     pub killer: String,
