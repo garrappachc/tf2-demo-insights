@@ -40,12 +40,16 @@ pub enum HighlightKind {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct Highlight {
     pub tick: u32,
     pub kind: HighlightKind,
     pub killer: String,
     pub victim: String,
-    pub weapon: String,
+    pub weapon: String,   // empty string = not available (used for non-lethal airshots)
+    pub lethal: bool,
+    pub height: Option<f32>,
+    pub damage: Option<u16>,  // only set for non-lethal airshot hits; populated in Task 3
 }
 
 #[derive(Default)]
@@ -72,7 +76,18 @@ impl HighlightAnalyser {
             .unwrap_or_else(|| format!("<#{}>", user_id))
     }
 
-    fn detect(&mut self, tick: u32, attacker: u16, user_id: u16, weapon: &str, custom_kill: u16, is_airborne: bool) {
+    #[allow(clippy::too_many_arguments)]
+    fn detect(
+        &mut self,
+        tick: u32,
+        attacker: u16,
+        user_id: u16,
+        weapon: &str,
+        custom_kill: u16,
+        is_airborne: bool,
+        lethal: bool,
+        height: Option<f32>,
+    ) {
         let is_headshot = custom_kill == TF_CUSTOM_HEADSHOT;
         // Airshot: victim was not touching the ground (FL_ONGROUND not set in m_fFlags)
         // as tracked from PacketEntities messages.
@@ -90,6 +105,9 @@ impl HighlightAnalyser {
                     killer: killer.clone(),
                     victim: victim.clone(),
                     weapon: weapon.clone(),
+                    lethal,
+                    height: None,
+                    damage: None,
                 });
             } else if is_airshot {
                 self.highlights.push(Highlight {
@@ -98,6 +116,9 @@ impl HighlightAnalyser {
                     killer,
                     victim,
                     weapon,
+                    lethal,
+                    height,
+                    damage: None,
                 });
             }
         }
@@ -147,6 +168,8 @@ impl MessageHandler for HighlightAnalyser {
                         event.weapon.as_ref(),
                         event.custom_kill,
                         is_airborne,
+                        true,   // lethal = true for PlayerDeath
+                        None,   // height will be computed in Task 2; None for now
                     );
                 }
             }
@@ -189,7 +212,7 @@ mod tests {
         analyser.players.insert(UserId::from(1u16), "SniperAlex".to_string());
         analyser.players.insert(UserId::from(2u16), "ScoutBob".to_string());
 
-        analyser.detect(100, 1, 2, "tf_sniper_rifle", TF_CUSTOM_HEADSHOT, false);
+        analyser.detect(100, 1, 2, "tf_sniper_rifle", TF_CUSTOM_HEADSHOT, false, true, None);
 
         assert_eq!(analyser.highlights.len(), 1);
         assert!(matches!(analyser.highlights[0].kind, HighlightKind::Headshot));
@@ -204,7 +227,7 @@ mod tests {
         analyser.players.insert(UserId::from(3u16), "SoldierCarla".to_string());
         analyser.players.insert(UserId::from(4u16), "MedicDave".to_string());
 
-        analyser.detect(200, 3, 4, "tf_projectile_rocket", 0, true);
+        analyser.detect(200, 3, 4, "tf_projectile_rocket", 0, true, true, None);
 
         assert_eq!(analyser.highlights.len(), 1);
         assert!(matches!(analyser.highlights[0].kind, HighlightKind::Airshot));
@@ -215,7 +238,7 @@ mod tests {
     #[test]
     fn test_non_highlight_not_detected() {
         let mut analyser = HighlightAnalyser::new();
-        analyser.detect(300, 1, 2, "tf_pistol", 0, false);
+        analyser.detect(300, 1, 2, "tf_pistol", 0, false, true, None);
         assert!(analyser.highlights.is_empty());
     }
 
@@ -224,5 +247,23 @@ mod tests {
         let analyser = HighlightAnalyser::new();
         let name = analyser.resolve_name(99u16);
         assert_eq!(name, "<#99>");
+    }
+
+    #[test]
+    fn test_lethal_flag_set_on_kill() {
+        let mut analyser = HighlightAnalyser::new();
+        analyser.players.insert(UserId::from(1u16), "A".to_string());
+        analyser.players.insert(UserId::from(2u16), "B".to_string());
+        analyser.detect(100, 1, 2, "tf_sniper_rifle", TF_CUSTOM_HEADSHOT, false, true, None);
+        assert!(analyser.highlights[0].lethal);
+    }
+
+    #[test]
+    fn test_height_stored_on_highlight() {
+        let mut analyser = HighlightAnalyser::new();
+        analyser.players.insert(UserId::from(1u16), "A".to_string());
+        analyser.players.insert(UserId::from(2u16), "B".to_string());
+        analyser.detect(100, 1, 2, "tf_projectile_rocket", 0, true, true, Some(84.5));
+        assert_eq!(analyser.highlights[0].height, Some(84.5));
     }
 }
