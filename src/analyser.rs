@@ -128,6 +128,10 @@ impl HighlightAnalyser {
         lethal: bool,
         height: Option<f32>,
     ) {
+        if attacker == user_id {
+            return;
+        }
+
         let is_headshot = custom_kill == TF_CUSTOM_HEADSHOT;
         // Airshot: victim was not touching the ground (FL_ONGROUND not set in m_fFlags)
         // as tracked from PacketEntities messages.
@@ -169,6 +173,10 @@ impl HighlightAnalyser {
     }
 
     fn push_non_lethal_airshot(&mut self, tick: u32, attacker: u16, user_id: u16, damage: u16) {
+        if attacker == user_id {
+            return;
+        }
+
         let victim_uid = UserId::from(user_id);
         let victim_entity = self.user_to_entity.get(&victim_uid).copied();
 
@@ -558,6 +566,27 @@ mod tests {
         let output = analyser.deduplicated_highlights();
         assert_eq!(output.len(), 1);
         assert!(!output[0].lethal);
+    }
+
+    #[test]
+    fn test_self_airshot_not_recorded() {
+        let mut analyser = HighlightAnalyser::new();
+        analyser.players.insert(UserId::from(1u16), "A".to_string());
+        analyser.detect(100, 1, 1, "tf_projectile_rocket", 0, true, true, Some(200.0));
+        assert!(analyser.highlights.is_empty());
+    }
+
+    #[test]
+    fn test_non_lethal_self_airshot_not_recorded() {
+        let mut analyser = HighlightAnalyser::new();
+        let eid = EntityId::from(4u32);
+        analyser.entity_flags.insert(eid, 0);
+        analyser.entity_ground_z.insert(eid, 0.0);
+        analyser.entity_origin_z.insert(eid, 200.0);
+        analyser.user_to_entity.insert(UserId::from(1u16), eid);
+        analyser.players.insert(UserId::from(1u16), "A".to_string());
+        analyser.push_non_lethal_airshot(100, 1, 1, 75);
+        assert!(analyser.highlights.is_empty());
     }
 
     #[test]

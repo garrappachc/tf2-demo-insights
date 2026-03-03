@@ -32,6 +32,8 @@ The victim must be:
 - **Airborne** — `FL_ONGROUND` not set in `m_fFlags` at the moment of the hit
 - **High enough** — ≥ 170 Source units above their last ground contact (matches the [supstats2](https://github.com/F2/F2s-sourcemod-plugins) threshold)
 
+The attacker must not be the victim (self-damage from blast jumps is excluded).
+
 The weapon must be a **projectile weapon** — rockets, grenades, stickies, and item-named equivalents (e.g. `iron_bomber`, `quake_rl`).
 
 For non-lethal hits, the attacker's active weapon entity is also checked against known hitscan server classes (`CTFScatterGun`, `CTFShotgun*`, `CTFMinigun`, `CTFPistol*`, `CTFSniperRifle*`, `CTFRevolver`) and rejected if matched.
