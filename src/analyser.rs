@@ -40,7 +40,6 @@ pub enum HighlightKind {
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct Highlight {
     pub tick: u32,
     pub kind: HighlightKind,
@@ -61,6 +60,10 @@ pub struct HighlightAnalyser {
     entity_flags: HashMap<EntityId, u32>,
     /// Maps UserId to entity index, populated from the userinfo string table.
     user_to_entity: HashMap<UserId, EntityId>,
+    /// Current Z coordinate per entity, from DT_BaseEntity::m_vecOrigin.
+    pub entity_origin_z: HashMap<EntityId, f32>,
+    /// Last Z coordinate where FL_ONGROUND was set, per entity.
+    pub entity_ground_z: HashMap<EntityId, f32>,
 }
 
 impl HighlightAnalyser {
@@ -76,6 +79,14 @@ impl HighlightAnalyser {
             .unwrap_or_else(|| format!("<#{}>", user_id))
     }
 
+    fn compute_height(&self, entity_id: EntityId) -> Option<f32> {
+        let current_z = self.entity_origin_z.get(&entity_id)?;
+        let ground_z = self.entity_ground_z.get(&entity_id)?;
+        Some((current_z - ground_z).max(0.0))
+    }
+
+    // `detect` accumulates arguments across tasks; a parameter struct will be
+    // introduced once the signature is stable (after Task 3 adds `damage`).
     #[allow(clippy::too_many_arguments)]
     fn detect(
         &mut self,
@@ -140,26 +151,39 @@ impl MessageHandler for HighlightAnalyser {
                         .server_classes
                         .get(<ClassId as Into<usize>>::into(entity.server_class))
                         && class.name.as_str() == "CTFPlayer"
-                        && let Some(prop) = entity.get_prop_by_name(
-                            "DT_BasePlayer",
-                            "m_fFlags",
-                            parser_state,
-                        )
-                        && let SendPropValue::Integer(flags) = prop.value
                     {
-                        self.entity_flags.insert(entity.entity_index, flags as u32);
+                        // 1. Update Z position first
+                        if let Some(prop) = entity.get_prop_by_name("DT_BaseEntity", "m_vecOrigin", parser_state)
+                            && let SendPropValue::Vector(v) = prop.value
+                        {
+                            self.entity_origin_z.insert(entity.entity_index, v.z);
+                        }
+
+                        // 2. Update flags, and when on ground capture Z as ground reference
+                        if let Some(prop) = entity.get_prop_by_name("DT_BasePlayer", "m_fFlags", parser_state)
+                            && let SendPropValue::Integer(flags) = prop.value
+                        {
+                            let flags = flags as u32;
+                            self.entity_flags.insert(entity.entity_index, flags);
+                            if flags & FL_ONGROUND != 0
+                                && let Some(z) = self.entity_origin_z.get(&entity.entity_index).copied() {
+                                    self.entity_ground_z.insert(entity.entity_index, z);
+                                }
+                        }
                     }
                 }
             }
             Message::GameEvent(event_msg) => {
                 if let GameEvent::PlayerDeath(event) = &event_msg.event {
                     let victim_uid = UserId::from(event.user_id);
-                    let is_airborne = self
-                        .user_to_entity
-                        .get(&victim_uid)
-                        .and_then(|eid| self.entity_flags.get(eid))
+                    let victim_entity = self.user_to_entity.get(&victim_uid).copied();
+
+                    let is_airborne = victim_entity
+                        .and_then(|eid| self.entity_flags.get(&eid))
                         .map(|flags| flags & FL_ONGROUND == 0)
                         .unwrap_or(false);
+
+                    let height = victim_entity.and_then(|eid| self.compute_height(eid));
 
                     self.detect(
                         u32::from(tick),
@@ -168,8 +192,8 @@ impl MessageHandler for HighlightAnalyser {
                         event.weapon.as_ref(),
                         event.custom_kill,
                         is_airborne,
-                        true,   // lethal = true for PlayerDeath
-                        None,   // height will be computed in Task 2; None for now
+                        true,
+                        height,
                     );
                 }
             }
@@ -265,5 +289,35 @@ mod tests {
         analyser.players.insert(UserId::from(2u16), "B".to_string());
         analyser.detect(100, 1, 2, "tf_projectile_rocket", 0, true, true, Some(84.5));
         assert_eq!(analyser.highlights[0].height, Some(84.5));
+    }
+
+    // --- Task 2 tests ---
+
+    #[test]
+    fn test_compute_height_above_ground() {
+        let mut analyser = HighlightAnalyser::new();
+        use tf_demo_parser::demo::message::packetentities::EntityId;
+        let eid = EntityId::from(5u32);
+        analyser.entity_ground_z.insert(eid, 100.0);
+        analyser.entity_origin_z.insert(eid, 184.5);
+        assert_eq!(analyser.compute_height(eid), Some(84.5));
+    }
+
+    #[test]
+    fn test_compute_height_below_ground_clamps_to_zero() {
+        let mut analyser = HighlightAnalyser::new();
+        use tf_demo_parser::demo::message::packetentities::EntityId;
+        let eid = EntityId::from(6u32);
+        analyser.entity_ground_z.insert(eid, 200.0);
+        analyser.entity_origin_z.insert(eid, 190.0);
+        assert_eq!(analyser.compute_height(eid), Some(0.0));
+    }
+
+    #[test]
+    fn test_compute_height_unknown_returns_none() {
+        let analyser = HighlightAnalyser::new();
+        use tf_demo_parser::demo::message::packetentities::EntityId;
+        let eid = EntityId::from(7u32);
+        assert_eq!(analyser.compute_height(eid), None);
     }
 }
