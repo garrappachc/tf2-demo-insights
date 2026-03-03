@@ -45,10 +45,11 @@ pub struct Highlight {
     pub kind: HighlightKind,
     pub killer: String,
     pub victim: String,
+    pub victim_user_id: u16, // raw user ID; used for deduplication (names can collide)
     pub weapon: String,   // empty string = not available (used for non-lethal airshots)
     pub lethal: bool,
     pub height: Option<f32>,
-    pub damage: Option<u16>,  // only set for non-lethal airshot hits; populated in Task 3
+    pub damage: Option<u16>,  // only set for non-lethal airshot hits
 }
 
 #[derive(Default)]
@@ -118,6 +119,7 @@ impl HighlightAnalyser {
                     kind: HighlightKind::Headshot,
                     killer: killer.clone(),
                     victim: victim.clone(),
+                    victim_user_id: user_id,
                     weapon: weapon.clone(),
                     lethal,
                     height: None,
@@ -129,6 +131,7 @@ impl HighlightAnalyser {
                     kind: HighlightKind::Airshot,
                     killer,
                     victim,
+                    victim_user_id: user_id,
                     weapon,
                     lethal,
                     height,
@@ -160,6 +163,7 @@ impl HighlightAnalyser {
             kind: HighlightKind::Airshot,
             killer,
             victim,
+            victim_user_id: user_id,
             weapon: String::new(),
             lethal: false,
             height,
@@ -170,12 +174,13 @@ impl HighlightAnalyser {
     fn deduplicated_highlights(self) -> Vec<Highlight> {
         use std::collections::HashSet;
 
-        // Collect (tick, victim) pairs for lethal airshots
-        let lethal_keys: HashSet<(u32, String)> = self
+        // Key on (tick, victim_user_id) — not victim name — to correctly handle
+        // duplicate player names (TF2 allows multiple players to share a display name).
+        let lethal_keys: HashSet<(u32, u16)> = self
             .highlights
             .iter()
             .filter(|h| h.lethal && matches!(h.kind, HighlightKind::Airshot))
-            .map(|h| (h.tick, h.victim.clone()))
+            .map(|h| (h.tick, h.victim_user_id))
             .collect();
 
         let mut result: Vec<Highlight> = self
@@ -184,7 +189,7 @@ impl HighlightAnalyser {
             .filter(|h| {
                 // Remove non-lethal airshots that have a lethal counterpart at same tick+victim
                 if !h.lethal && matches!(h.kind, HighlightKind::Airshot) {
-                    !lethal_keys.contains(&(h.tick, h.victim.clone()))
+                    !lethal_keys.contains(&(h.tick, h.victim_user_id))
                 } else {
                     true
                 }
@@ -437,12 +442,13 @@ mod tests {
     #[test]
     fn test_deduplication_removes_non_lethal_when_lethal_exists() {
         let mut analyser = HighlightAnalyser::new();
-        // One lethal and one non-lethal at same tick for same victim
+        // One lethal and one non-lethal at same tick for same victim (user_id=2)
         analyser.highlights.push(Highlight {
             tick: 100,
             kind: HighlightKind::Airshot,
             killer: "A".to_string(),
             victim: "B".to_string(),
+            victim_user_id: 2,
             weapon: "tf_projectile_rocket".to_string(),
             lethal: true,
             height: None,
@@ -453,6 +459,7 @@ mod tests {
             kind: HighlightKind::Airshot,
             killer: "A".to_string(),
             victim: "B".to_string(),
+            victim_user_id: 2,
             weapon: String::new(),
             lethal: false,
             height: None,
@@ -462,5 +469,36 @@ mod tests {
         let output = analyser.deduplicated_highlights();
         assert_eq!(output.len(), 1);
         assert!(output[0].lethal);
+    }
+
+    #[test]
+    fn test_deduplication_keeps_non_lethal_with_no_matching_lethal() {
+        let mut analyser = HighlightAnalyser::new();
+        analyser.highlights.push(Highlight {
+            tick: 200,
+            kind: HighlightKind::Airshot,
+            killer: "A".to_string(),
+            victim: "B".to_string(),
+            victim_user_id: 2,
+            weapon: String::new(),
+            lethal: false,
+            height: None,
+            damage: Some(50),
+        });
+
+        let output = analyser.deduplicated_highlights();
+        assert_eq!(output.len(), 1);
+        assert!(!output[0].lethal);
+    }
+
+    #[test]
+    fn test_non_lethal_airshot_unknown_entity_not_added() {
+        let mut analyser = HighlightAnalyser::new();
+        // No user_to_entity mapping for user_id=2 — unknown entity, treated as grounded
+        analyser.players.insert(UserId::from(1u16), "A".to_string());
+        analyser.players.insert(UserId::from(2u16), "B".to_string());
+
+        analyser.push_non_lethal_airshot(100, 1, 2, 75);
+        assert!(analyser.highlights.is_empty());
     }
 }
