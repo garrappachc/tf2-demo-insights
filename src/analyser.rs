@@ -65,7 +65,8 @@ pub struct HighlightAnalyser {
     entity_flags: HashMap<EntityId, u32>,
     /// Maps UserId to entity index, populated from the userinfo string table.
     user_to_entity: HashMap<UserId, EntityId>,
-    /// Current Z coordinate per entity, from DT_TFPlayer::m_vecOrigin.
+    /// Current Z coordinate per entity, from DT_TFNonLocalPlayerExclusive (or
+    /// DT_TFLocalPlayerExclusive for the demo recorder) prop "m_vecOrigin[2]".
     /// `pub` so tests can pre-populate Z state without going through PacketEntities.
     pub entity_origin_z: HashMap<EntityId, f32>,
     /// Last Z coordinate where FL_ONGROUND was set, per entity.
@@ -228,11 +229,17 @@ impl MessageHandler for HighlightAnalyser {
                         .get(<ClassId as Into<usize>>::into(entity.server_class))
                         && class.name.as_str() == "CTFPlayer"
                     {
-                        // 1. Update Z position first
-                        if let Some(prop) = entity.get_prop_by_name("DT_TFPlayer", "m_vecOrigin", parser_state)
-                            && let SendPropValue::Vector(v) = prop.value
+                        // 1. Update Z position first.
+                        // Players split origin into XY + Z: the Z component is the float prop
+                        // "m_vecOrigin[2]" in DT_TFNonLocalPlayerExclusive (all other players)
+                        // or DT_TFLocalPlayerExclusive (the demo recorder).
+                        let origin_z_prop = entity
+                            .get_prop_by_name("DT_TFNonLocalPlayerExclusive", "m_vecOrigin[2]", parser_state)
+                            .or_else(|| entity.get_prop_by_name("DT_TFLocalPlayerExclusive", "m_vecOrigin[2]", parser_state));
+                        if let Some(prop) = origin_z_prop
+                            && let SendPropValue::Float(z) = prop.value
                         {
-                            self.entity_origin_z.insert(entity.entity_index, v.z);
+                            self.entity_origin_z.insert(entity.entity_index, z);
                         }
 
                         // 2. Update flags, and when on ground capture Z as ground reference.
