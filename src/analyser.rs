@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use tf_demo_parser::demo::data::UserInfo as DataUserInfo;
 use tf_demo_parser::demo::gameevent_gen::GameEvent;
@@ -21,6 +21,20 @@ const FL_ONGROUND: u32 = 1 << 0;
 /// Minimum height above ground (in Source units) for a valid airshot,
 /// matching the threshold used by the F2 SourceMod plugin (supstats2).
 const MIN_AIRSHOT_HEIGHT: f32 = 170.0;
+
+/// Returns true if `class` is a non-projectile (hitscan or melee) weapon server class.
+///
+/// Used to filter out non-lethal hits from weapons that cannot legitimately
+/// produce airshots in the traditional sense (rockets, grenades, stickies, etc.).
+/// Unknown weapon classes are NOT listed here and default to "allowed".
+fn is_hitscan_weapon_class(class: &str) -> bool {
+    matches!(
+        class,
+        "CTFScatterGun" | "CTFMinigun" | "CTFRevolver" | "CTFMedigun" | "CTFLaserPointer"
+    ) || class.starts_with("CTFShotgun")
+        || class.starts_with("CTFPistol")
+        || class.starts_with("CTFSniperRifle")
+}
 
 /// Returns true if `weapon` is a projectile-firing weapon.
 ///
@@ -72,6 +86,12 @@ pub struct HighlightAnalyser {
     /// Last Z coordinate where FL_ONGROUND was set, per entity.
     /// `pub` so tests can pre-populate Z state without going through PacketEntities.
     pub entity_ground_z: HashMap<EntityId, f32>,
+    /// Entity IDs whose server class is a known non-projectile (hitscan/melee) weapon.
+    /// Populated from PacketEntities; used to filter non-lethal airshots.
+    hitscan_weapon_entities: HashSet<EntityId>,
+    /// Maps player entity ID → their currently active weapon entity ID,
+    /// decoded from DT_BaseCombatCharacter::m_hActiveWeapon handle.
+    player_active_weapon: HashMap<EntityId, EntityId>,
 }
 
 impl HighlightAnalyser {
@@ -161,6 +181,18 @@ impl HighlightAnalyser {
             return;
         }
 
+        // Reject hits from known hitscan weapons (scattergun, shotgun, minigun, etc.).
+        // If the attacker's weapon entity is unknown, err on the side of inclusion.
+        let attacker_entity = self.user_to_entity.get(&UserId::from(attacker)).copied();
+        let is_hitscan = attacker_entity
+            .and_then(|eid| self.player_active_weapon.get(&eid))
+            .map(|weid| self.hitscan_weapon_entities.contains(weid))
+            .unwrap_or(false);
+
+        if is_hitscan {
+            return;
+        }
+
         let height = victim_entity.and_then(|eid| self.compute_height(eid));
 
         if !height.map_or(false, |h| h >= MIN_AIRSHOT_HEIGHT) {
@@ -224,11 +256,20 @@ impl MessageHandler for HighlightAnalyser {
         match message {
             Message::PacketEntities(entity_msg) => {
                 for entity in &entity_msg.entities {
-                    if let Some(class) = parser_state
+                    let Some(class) = parser_state
                         .server_classes
                         .get(<ClassId as Into<usize>>::into(entity.server_class))
-                        && class.name.as_str() == "CTFPlayer"
-                    {
+                    else {
+                        continue;
+                    };
+                    let class_name = class.name.as_str();
+
+                    // Track hitscan weapon entities for all entity types.
+                    if is_hitscan_weapon_class(class_name) {
+                        self.hitscan_weapon_entities.insert(entity.entity_index);
+                    }
+
+                    if class_name == "CTFPlayer" {
                         // 1. Update Z position first.
                         // Players split origin into XY + Z: the Z component is the float prop
                         // "m_vecOrigin[2]" in DT_TFNonLocalPlayerExclusive (all other players)
@@ -255,6 +296,14 @@ impl MessageHandler for HighlightAnalyser {
                                 && let Some(z) = self.entity_origin_z.get(&entity.entity_index).copied() {
                                     self.entity_ground_z.insert(entity.entity_index, z);
                                 }
+                        }
+
+                        // 3. Track active weapon (entity handle → entity index, lower 11 bits).
+                        if let Some(prop) = entity.get_prop_by_name("DT_BaseCombatCharacter", "m_hActiveWeapon", parser_state)
+                            && let SendPropValue::Integer(handle) = prop.value
+                        {
+                            let weapon_eid = EntityId::from((handle as u32) & 0x7FF);
+                            self.player_active_weapon.insert(entity.entity_index, weapon_eid);
                         }
                     }
                 }
@@ -553,5 +602,52 @@ mod tests {
 
         analyser.push_non_lethal_airshot(100, 1, 2, 75);
         assert!(analyser.highlights.is_empty());
+    }
+
+    #[test]
+    fn test_non_lethal_airshot_hitscan_weapon_rejected() {
+        let mut analyser = HighlightAnalyser::new();
+        let victim_eid = EntityId::from(10u32);
+        let attacker_eid = EntityId::from(11u32);
+        let weapon_eid = EntityId::from(20u32);
+
+        // Victim is airborne and high enough
+        analyser.entity_flags.insert(victim_eid, 0);
+        analyser.entity_ground_z.insert(victim_eid, 0.0);
+        analyser.entity_origin_z.insert(victim_eid, 200.0);
+        analyser.user_to_entity.insert(UserId::from(2u16), victim_eid);
+
+        // Attacker's active weapon is a scattergun (hitscan)
+        analyser.user_to_entity.insert(UserId::from(1u16), attacker_eid);
+        analyser.player_active_weapon.insert(attacker_eid, weapon_eid);
+        analyser.hitscan_weapon_entities.insert(weapon_eid);
+
+        analyser.players.insert(UserId::from(1u16), "A".to_string());
+        analyser.players.insert(UserId::from(2u16), "B".to_string());
+
+        analyser.push_non_lethal_airshot(100, 1, 2, 75);
+        assert!(analyser.highlights.is_empty());
+    }
+
+    #[test]
+    fn test_non_lethal_airshot_unknown_weapon_allowed() {
+        let mut analyser = HighlightAnalyser::new();
+        let victim_eid = EntityId::from(10u32);
+        let attacker_eid = EntityId::from(11u32);
+
+        // Victim is airborne and high enough
+        analyser.entity_flags.insert(victim_eid, 0);
+        analyser.entity_ground_z.insert(victim_eid, 0.0);
+        analyser.entity_origin_z.insert(victim_eid, 200.0);
+        analyser.user_to_entity.insert(UserId::from(2u16), victim_eid);
+
+        // Attacker entity known but active weapon entity not tracked
+        analyser.user_to_entity.insert(UserId::from(1u16), attacker_eid);
+
+        analyser.players.insert(UserId::from(1u16), "A".to_string());
+        analyser.players.insert(UserId::from(2u16), "B".to_string());
+
+        analyser.push_non_lethal_airshot(100, 1, 2, 75);
+        assert_eq!(analyser.highlights.len(), 1);
     }
 }
