@@ -18,6 +18,21 @@ const TF_CUSTOM_HEADSHOT: u16 = 1;
 /// Source Engine FL_ONGROUND flag — set when the player is touching the ground.
 const FL_ONGROUND: u32 = 1 << 0;
 
+/// Returns true if `weapon` is a projectile-firing weapon.
+///
+/// TF2 demos report the killing weapon as either the projectile entity classname
+/// (e.g. `tf_projectile_rocket`) or the weapon's item name (e.g. `iron_bomber`).
+fn is_projectile_weapon(weapon: &str) -> bool {
+    weapon.starts_with("tf_projectile_")
+        || matches!(
+            weapon,
+            "iron_bomber"
+                | "loose_cannon"
+                | "quickiebomb_launcher"
+                | "quake_rl"
+        )
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HighlightKind {
     Headshot,
@@ -61,7 +76,7 @@ impl HighlightAnalyser {
         let is_headshot = custom_kill == TF_CUSTOM_HEADSHOT;
         // Airshot: victim was not touching the ground (FL_ONGROUND not set in m_fFlags)
         // as tracked from PacketEntities messages.
-        let is_airshot = is_airborne;
+        let is_airshot = is_airborne && is_projectile_weapon(weapon);
 
         if is_headshot || is_airshot {
             let killer = self.resolve_name(attacker);
