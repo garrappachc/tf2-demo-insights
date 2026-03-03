@@ -18,6 +18,10 @@ const TF_CUSTOM_HEADSHOT: u16 = 1;
 /// Source Engine FL_ONGROUND flag — set when the player is touching the ground.
 const FL_ONGROUND: u32 = 1 << 0;
 
+/// Minimum height above ground (in Source units) for a valid airshot,
+/// matching the threshold used by the F2 SourceMod plugin (supstats2).
+const MIN_AIRSHOT_HEIGHT: f32 = 170.0;
+
 /// Returns true if `weapon` is a projectile-firing weapon.
 ///
 /// TF2 demos report the killing weapon as either the projectile entity classname
@@ -61,7 +65,7 @@ pub struct HighlightAnalyser {
     entity_flags: HashMap<EntityId, u32>,
     /// Maps UserId to entity index, populated from the userinfo string table.
     user_to_entity: HashMap<UserId, EntityId>,
-    /// Current Z coordinate per entity, from DT_BaseEntity::m_vecOrigin.
+    /// Current Z coordinate per entity, from DT_TFPlayer::m_vecOrigin.
     /// `pub` so tests can pre-populate Z state without going through PacketEntities.
     pub entity_origin_z: HashMap<EntityId, f32>,
     /// Last Z coordinate where FL_ONGROUND was set, per entity.
@@ -126,17 +130,19 @@ impl HighlightAnalyser {
                     damage: None,
                 });
             } else if is_airshot {
-                self.highlights.push(Highlight {
-                    tick,
-                    kind: HighlightKind::Airshot,
-                    killer,
-                    victim,
-                    victim_user_id: user_id,
-                    weapon,
-                    lethal,
-                    height,
-                    damage: None,
-                });
+                if height.map_or(false, |h| h >= MIN_AIRSHOT_HEIGHT) {
+                    self.highlights.push(Highlight {
+                        tick,
+                        kind: HighlightKind::Airshot,
+                        killer,
+                        victim,
+                        victim_user_id: user_id,
+                        weapon,
+                        lethal,
+                        height,
+                        damage: None,
+                    });
+                }
             }
         }
     }
@@ -155,6 +161,11 @@ impl HighlightAnalyser {
         }
 
         let height = victim_entity.and_then(|eid| self.compute_height(eid));
+
+        if !height.map_or(false, |h| h >= MIN_AIRSHOT_HEIGHT) {
+            return;
+        }
+
         let killer = self.resolve_name(attacker);
         let victim = self.resolve_name(user_id);
 
@@ -218,7 +229,7 @@ impl MessageHandler for HighlightAnalyser {
                         && class.name.as_str() == "CTFPlayer"
                     {
                         // 1. Update Z position first
-                        if let Some(prop) = entity.get_prop_by_name("DT_BaseEntity", "m_vecOrigin", parser_state)
+                        if let Some(prop) = entity.get_prop_by_name("DT_TFPlayer", "m_vecOrigin", parser_state)
                             && let SendPropValue::Vector(v) = prop.value
                         {
                             self.entity_origin_z.insert(entity.entity_index, v.z);
@@ -331,7 +342,7 @@ mod tests {
         analyser.players.insert(UserId::from(3u16), "SoldierCarla".to_string());
         analyser.players.insert(UserId::from(4u16), "MedicDave".to_string());
 
-        analyser.detect(200, 3, 4, "tf_projectile_rocket", 0, true, true, None);
+        analyser.detect(200, 3, 4, "tf_projectile_rocket", 0, true, true, Some(200.0));
 
         assert_eq!(analyser.highlights.len(), 1);
         assert!(matches!(analyser.highlights[0].kind, HighlightKind::Airshot));
@@ -367,8 +378,8 @@ mod tests {
         let mut analyser = HighlightAnalyser::new();
         analyser.players.insert(UserId::from(1u16), "A".to_string());
         analyser.players.insert(UserId::from(2u16), "B".to_string());
-        analyser.detect(100, 1, 2, "tf_projectile_rocket", 0, true, true, Some(84.5));
-        assert_eq!(analyser.highlights[0].height, Some(84.5));
+        analyser.detect(100, 1, 2, "tf_projectile_rocket", 0, true, true, Some(200.0));
+        assert_eq!(analyser.highlights[0].height, Some(200.0));
     }
 
     // --- Task 2 tests ---
@@ -415,6 +426,8 @@ mod tests {
         let eid = EntityId::from(4u32);
         // Mark victim as airborne (FL_ONGROUND not set)
         analyser.entity_flags.insert(eid, 0);
+        analyser.entity_ground_z.insert(eid, 0.0);
+        analyser.entity_origin_z.insert(eid, 200.0);
         analyser.user_to_entity.insert(UserId::from(2u16), eid);
         analyser.players.insert(UserId::from(1u16), "A".to_string());
         analyser.players.insert(UserId::from(2u16), "B".to_string());
@@ -489,6 +502,39 @@ mod tests {
         let output = analyser.deduplicated_highlights();
         assert_eq!(output.len(), 1);
         assert!(!output[0].lethal);
+    }
+
+    #[test]
+    fn test_airshot_below_height_threshold_not_recorded() {
+        let mut analyser = HighlightAnalyser::new();
+        analyser.players.insert(UserId::from(1u16), "A".to_string());
+        analyser.players.insert(UserId::from(2u16), "B".to_string());
+        analyser.detect(100, 1, 2, "tf_projectile_rocket", 0, true, true, Some(100.0));
+        assert!(analyser.highlights.is_empty());
+    }
+
+    #[test]
+    fn test_airshot_unknown_height_not_recorded() {
+        let mut analyser = HighlightAnalyser::new();
+        analyser.players.insert(UserId::from(1u16), "A".to_string());
+        analyser.players.insert(UserId::from(2u16), "B".to_string());
+        analyser.detect(100, 1, 2, "tf_projectile_rocket", 0, true, true, None);
+        assert!(analyser.highlights.is_empty());
+    }
+
+    #[test]
+    fn test_non_lethal_airshot_below_threshold_not_added() {
+        let mut analyser = HighlightAnalyser::new();
+        let eid = EntityId::from(9u32);
+        analyser.entity_flags.insert(eid, 0); // airborne
+        analyser.entity_ground_z.insert(eid, 0.0);
+        analyser.entity_origin_z.insert(eid, 50.0); // only 50 units high
+        analyser.user_to_entity.insert(UserId::from(2u16), eid);
+        analyser.players.insert(UserId::from(1u16), "A".to_string());
+        analyser.players.insert(UserId::from(2u16), "B".to_string());
+
+        analyser.push_non_lethal_airshot(100, 1, 2, 75);
+        assert!(analyser.highlights.is_empty());
     }
 
     #[test]
