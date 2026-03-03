@@ -41,9 +41,10 @@ fn main() {
         return;
     }
 
+    // Use char count (not byte length) so Unicode names (e.g. "mały") align correctly.
     let name_width = highlights
         .iter()
-        .map(|h| h.killer.len().max(h.victim.len()))
+        .map(|h| h.killer.chars().count().max(h.victim.chars().count()))
         .max()
         .unwrap_or(10);
 
