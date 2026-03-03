@@ -2,15 +2,21 @@ use std::collections::HashMap;
 
 use tf_demo_parser::demo::data::UserInfo as DataUserInfo;
 use tf_demo_parser::demo::gameevent_gen::GameEvent;
+use tf_demo_parser::demo::message::packetentities::EntityId;
 use tf_demo_parser::demo::message::{Message, MessageType};
+use tf_demo_parser::demo::packet::datatable::ClassId;
 use tf_demo_parser::demo::packet::stringtable::StringTableEntry;
 use tf_demo_parser::demo::parser::analyser::UserId;
 use tf_demo_parser::demo::parser::handler::MessageHandler;
 use tf_demo_parser::demo::data::DemoTick;
+use tf_demo_parser::demo::sendprop::SendPropValue;
 use tf_demo_parser::ParserState;
 
 /// TF2 custom kill type: headshot (sniper rifle)
 const TF_CUSTOM_HEADSHOT: u16 = 1;
+
+/// Source Engine FL_ONGROUND flag — set when the player is touching the ground.
+const FL_ONGROUND: u32 = 1 << 0;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HighlightKind {
@@ -32,6 +38,10 @@ pub struct HighlightAnalyser {
     pub highlights: Vec<Highlight>,
     /// Maps UserId -> player name, populated from the userinfo string table
     pub players: HashMap<UserId, String>,
+    /// Tracks m_fFlags per player entity, updated from PacketEntities messages.
+    entity_flags: HashMap<EntityId, u32>,
+    /// Maps UserId to entity index, populated from the userinfo string table.
+    user_to_entity: HashMap<UserId, EntityId>,
 }
 
 impl HighlightAnalyser {
@@ -47,12 +57,11 @@ impl HighlightAnalyser {
             .unwrap_or_else(|| format!("<#{}>", user_id))
     }
 
-    fn detect(&mut self, tick: u32, attacker: u16, user_id: u16, weapon: &str, custom_kill: u16, rocket_jump: bool) {
+    fn detect(&mut self, tick: u32, attacker: u16, user_id: u16, weapon: &str, custom_kill: u16, is_airborne: bool) {
         let is_headshot = custom_kill == TF_CUSTOM_HEADSHOT;
-        // The `rocket_jump` flag is set when the victim was mid-explosive-jump at the
-        // time of death (rocket/sticky jump). This is a subset of all airshots but
-        // captures the most dramatic ones. Full ground-state tracking is out of scope for v1.
-        let is_airshot = rocket_jump;
+        // Airshot: victim was not touching the ground (FL_ONGROUND not set in m_fFlags)
+        // as tracked from PacketEntities messages.
+        let is_airshot = is_airborne;
 
         if is_headshot || is_airshot {
             let killer = self.resolve_name(attacker);
@@ -84,21 +93,50 @@ impl MessageHandler for HighlightAnalyser {
     type Output = Vec<Highlight>;
 
     fn does_handle(message_type: MessageType) -> bool {
-        matches!(message_type, MessageType::GameEvent)
+        matches!(message_type, MessageType::GameEvent | MessageType::PacketEntities)
     }
 
-    fn handle_message(&mut self, message: &Message, tick: DemoTick, _parser_state: &ParserState) {
-        if let Message::GameEvent(event_msg) = message
-            && let GameEvent::PlayerDeath(event) = &event_msg.event {
-                self.detect(
-                    u32::from(tick),
-                    event.attacker,
-                    event.user_id,
-                    event.weapon.as_ref(),
-                    event.custom_kill,
-                    event.rocket_jump,
-                );
+    fn handle_message(&mut self, message: &Message, tick: DemoTick, parser_state: &ParserState) {
+        match message {
+            Message::PacketEntities(entity_msg) => {
+                for entity in &entity_msg.entities {
+                    if let Some(class) = parser_state
+                        .server_classes
+                        .get(<ClassId as Into<usize>>::into(entity.server_class))
+                        && class.name.as_str() == "CTFPlayer"
+                        && let Some(prop) = entity.get_prop_by_name(
+                            "DT_BasePlayer",
+                            "m_fFlags",
+                            parser_state,
+                        )
+                        && let SendPropValue::Integer(flags) = prop.value
+                    {
+                        self.entity_flags.insert(entity.entity_index, flags as u32);
+                    }
+                }
             }
+            Message::GameEvent(event_msg) => {
+                if let GameEvent::PlayerDeath(event) = &event_msg.event {
+                    let victim_uid = UserId::from(event.user_id);
+                    let is_airborne = self
+                        .user_to_entity
+                        .get(&victim_uid)
+                        .and_then(|eid| self.entity_flags.get(eid))
+                        .map(|flags| flags & FL_ONGROUND == 0)
+                        .unwrap_or(false);
+
+                    self.detect(
+                        u32::from(tick),
+                        event.attacker,
+                        event.user_id,
+                        event.weapon.as_ref(),
+                        event.custom_kill,
+                        is_airborne,
+                    );
+                }
+            }
+            _ => {}
+        }
     }
 
     fn handle_string_entry(
@@ -116,6 +154,7 @@ impl MessageHandler for HighlightAnalyser {
             {
                 self.players
                     .insert(user_info.player_info.user_id, user_info.player_info.name);
+                self.user_to_entity.insert(user_info.player_info.user_id, user_info.entity_id);
             }
         }
     }
