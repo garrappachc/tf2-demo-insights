@@ -49,6 +49,9 @@ impl HighlightAnalyser {
 
     fn detect(&mut self, tick: u32, attacker: u16, user_id: u16, weapon: &str, custom_kill: u16, rocket_jump: bool) {
         let is_headshot = custom_kill == TF_CUSTOM_HEADSHOT;
+        // The `rocket_jump` flag is set when the victim was mid-explosive-jump at the
+        // time of death (rocket/sticky jump). This is a subset of all airshots but
+        // captures the most dramatic ones. Full ground-state tracking is out of scope for v1.
         let is_airshot = rocket_jump;
 
         if is_headshot || is_airshot {
@@ -64,8 +67,7 @@ impl HighlightAnalyser {
                     victim: victim.clone(),
                     weapon: weapon.clone(),
                 });
-            }
-            if is_airshot {
+            } else if is_airshot {
                 self.highlights.push(Highlight {
                     tick,
                     kind: HighlightKind::Airshot,
